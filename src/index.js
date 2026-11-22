@@ -12,6 +12,7 @@ const [{ default: puppeteer }, { default: chromium }] = await Promise.all([
 const {
   DynamoDBClient,
   BatchWriteItemCommand,
+  ScanCommand,
 } = require("@aws-sdk/client-dynamodb");
 const { SSMClient, GetParameterCommand } = require("@aws-sdk/client-ssm");
 
@@ -34,6 +35,7 @@ const [USERNAME, PASSWORD] = await Promise.all([
 // LodgeMaster now delegates login to an OpenID Connect identity server:
 //   lodgemaster-client -> portal.oa-scouting.org -> id.oa-scouting.org (login)
 const START_URL = "https://lodgemaster-client.oa-scouting.org/";
+const APP_HOST = new URL(START_URL).host;
 const IDENTITY_HOST = "id.oa-scouting.org";
 // Includes id.oa-scouting.org itself: the identity server's own session
 // cookie (set during the login redirect chain, since the page is briefly
@@ -54,6 +56,17 @@ const COOKIE_NAMES = (process.env.COOKIE_NAMES || "")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
+
+// Cookies that must be present for a scrape to count as successful. Only the
+// LodgeMaster app's own sign-in sets OA.LM.Lodge.Auth; the portal/identity
+// cookies alone are not enough for consumers such as lodge104-memberdata,
+// whose /api/app/login call returns 400 without it. If the login redirect
+// chain ends somewhere other than the app (e.g. portal.oa-scouting.org, as
+// happened from 2026-11-16), this check fails the invocation so the error
+// alarm fires instead of the scrape "succeeding" with an unusable jar.
+const REQUIRED_COOKIE_NAMES = ["OA.LM.Lodge.Auth"].filter(
+  (n) => !COOKIE_NAMES.length || COOKIE_NAMES.includes(n),
+);
 
 const LOGIN_TIMEOUT_MS = 60000;
 const MAX_BATCH_SIZE = 25; // DynamoDB BatchWriteItem limit
@@ -103,11 +116,39 @@ async function login(page) {
   // Let the redirect chain back to the app finish and cookies settle.
   await page.waitForNetworkIdle({ idleTime: 2000, timeout: LOGIN_TIMEOUT_MS });
 
-  const finalUrl = new URL(page.url());
+  let finalUrl = new URL(page.url());
   if (finalUrl.host === IDENTITY_HOST) {
     throw new Error(`Login did not complete, still on ${page.url()}`);
   }
   console.log(`Logged in, landed on ${finalUrl.origin}${finalUrl.pathname}`);
+
+  // The identity server sometimes sends us on to the portal rather than
+  // back to LodgeMaster, which skips the app's own sign-in step (and so its
+  // OA.LM.Lodge.Auth cookie). Revisit the app: with an identity session
+  // already established, its OIDC challenge completes silently.
+  if (finalUrl.host !== APP_HOST) {
+    console.log(
+      `Not on ${APP_HOST}; revisiting ${START_URL} to sign in to the app`,
+    );
+    await page.goto(START_URL, {
+      waitUntil: "networkidle2",
+      timeout: LOGIN_TIMEOUT_MS,
+    });
+    await page.waitForNetworkIdle({
+      idleTime: 2000,
+      timeout: LOGIN_TIMEOUT_MS,
+    });
+
+    finalUrl = new URL(page.url());
+    if (finalUrl.host !== APP_HOST) {
+      throw new Error(
+        `App sign-in did not complete, ended on ${finalUrl.origin}${finalUrl.pathname}`,
+      );
+    }
+    console.log(
+      `App sign-in complete, landed on ${finalUrl.origin}${finalUrl.pathname}`,
+    );
+  }
 }
 
 async function collectCookies(page) {
@@ -125,13 +166,48 @@ async function collectCookies(page) {
     );
   }
   console.log(`Captured cookies: ${[...byName.keys()].join(", ")}`);
+
+  const missing = REQUIRED_COOKIE_NAMES.filter((n) => !byName.has(n));
+  if (missing.length) {
+    throw new Error(
+      `Required cookie(s) missing after login: ${missing.join(", ")}` +
+        ` (landed on ${new URL(page.url()).origin}). Not updating ${TABLE_NAME}.`,
+    );
+  }
   return byName;
 }
 
+async function listStoredCookieNames() {
+  const names = [];
+  let ExclusiveStartKey;
+  do {
+    const data = await ddbClient.send(
+      new ScanCommand({
+        TableName: TABLE_NAME,
+        ProjectionExpression: "#n",
+        ExpressionAttributeNames: { "#n": "name" },
+        ExclusiveStartKey,
+      }),
+    );
+    for (const item of data.Items || []) names.push(item.name.S);
+    ExclusiveStartKey = data.LastEvaluatedKey;
+  } while (ExclusiveStartKey);
+  return names;
+}
+
 async function writeCookies(cookies) {
-  const requests = [...cookies].map(([name, value]) => ({
-    PutRequest: { Item: { name: { S: name }, value: { S: value } } },
-  }));
+  // Cookies from earlier runs that this login did not issue are removed, so
+  // consumers never pick up an expired value left behind by a previous scrape.
+  const stale = (await listStoredCookieNames()).filter((n) => !cookies.has(n));
+
+  const requests = [
+    ...[...cookies].map(([name, value]) => ({
+      PutRequest: { Item: { name: { S: name }, value: { S: value } } },
+    })),
+    ...stale.map((name) => ({
+      DeleteRequest: { Key: { name: { S: name } } },
+    })),
+  ];
 
   for (let i = 0; i < requests.length; i += MAX_BATCH_SIZE) {
     let pending = { [TABLE_NAME]: requests.slice(i, i + MAX_BATCH_SIZE) };
@@ -148,7 +224,10 @@ async function writeCookies(cookies) {
       pending = data.UnprocessedItems || {};
     }
   }
-  console.log(`Success, ${requests.length} items written to ${TABLE_NAME}`);
+  console.log(
+    `Success, ${cookies.size} items written to ${TABLE_NAME}` +
+      (stale.length ? `; removed stale: ${stale.join(", ")}` : ""),
+  );
 }
 
 export const handler = async () => {

@@ -107,10 +107,17 @@ Resources:
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
-              # Least-privilege: only the operations actually used by index.js
+              # Least-privilege: only the operations actually used by index.js.
+              # BatchWriteItem covers both the cookie Puts and the Deletes of
+              # stale cookies; Scan lists stored cookie names (projection on
+              # the "name" key only) so stale ones can be removed.
               - Sid: BatchWrite
                 Effect: Allow
                 Action: dynamodb:BatchWriteItem
+                Resource: !Sub "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${TableName}"
+              - Sid: ListStoredCookies
+                Effect: Allow
+                Action: dynamodb:Scan
                 Resource: !Sub "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${TableName}"
         - PolicyName: LodgeMasterCredentialAccess
           PolicyDocument:
