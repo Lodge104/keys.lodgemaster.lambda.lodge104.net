@@ -44,6 +44,24 @@ is recycled, with no guaranteed time.
 The `AlarmTopicArn`/`ErrorAlarmThreshold`/etc. parameters above are not
 secrets and remain plain CloudFormation parameters.
 
+## Login flow & stored cookies
+
+After the identity-server login, the function makes sure it ends up on
+`lodgemaster-client.oa-scouting.org`. The identity server sometimes redirects
+to `portal.oa-scouting.org` instead (seen from 2026-11-16), which skips the
+LodgeMaster app's own sign-in, so its `OA.LM.Lodge.Auth` cookie is never set.
+When that happens, the function loads the app URL again, and the app signs in
+silently using the existing identity session.
+
+An invocation **fails** (and counts toward the error alarm) if
+`OA.LM.Lodge.Auth` is still missing after login. Consumers such as
+`lodge104-memberdata` cannot authenticate without it, so a scrape without it
+must not be reported as successful. The table is not modified in that case.
+
+On a successful scrape, the captured cookies are written to the table and any
+cookie names left in the table from earlier runs that this login did not
+issue are deleted, so consumers never read an expired leftover value.
+
 ## Monitoring & alerts
 
 The stack defines a CloudWatch alarm, `ScrapperErrorAlarm`, that watches the
