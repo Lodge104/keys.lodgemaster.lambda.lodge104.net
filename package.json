@@ -8,14 +8,14 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Lodge104/lodgemaster-scrapper.git"
+    "url": "git+https://github.com/Lodge104/keys.lodgemaster.lambda.lodge104.net.git"
   },
   "author": "Nicholas Anderson",
   "license": "ISC",
   "bugs": {
-    "url": "https://github.com/Lodge104/lodgemaster-scrapper/issues"
+    "url": "https://github.com/Lodge104/keys.lodgemaster.lambda.lodge104.net/issues"
   },
-  "homepage": "https://github.com/Lodge104/lodgemaster-scrapper#readme",
+  "homepage": "https://github.com/Lodge104/keys.lodgemaster.lambda.lodge104.net#readme",
   "devDependencies": {
     "@sparticuz/chromium": "~153.0.0",
     "puppeteer-core": "~25.18.1"

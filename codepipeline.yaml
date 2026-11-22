@@ -22,7 +22,10 @@ Description: >
 Parameters:
   FullRepositoryId:
     Type: String
-    Default: "Lodge104/lambda-lodgemaster-keys"
+    # Must match the repo's *current* GitHub name. GitHub redirects git
+    # traffic for renamed repos, but CodeStar connection push events carry
+    # the new name, so a stale value here silently stops webhook triggers.
+    Default: "Lodge104/keys.lodgemaster.lambda.lodge104.net"
     Description: "<github-org>/<repo-name>"
   GitBranch:
     Type: String
